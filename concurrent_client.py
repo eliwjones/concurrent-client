@@ -76,7 +76,7 @@ async def batch_requests(method, headers, url, payloads, concurrency):
 
 
 async def main(requests, concurrency, api):
-    headers = {'Content-Type': 'application/json', 'Authorization': f"Bearer {os.environ['METERED_API_KEY']}"}
+    headers = {'Content-Type': 'application/json', 'Authorization': f"Bearer {os.environ['API_KEY']}"}
     payload = json.dumps({'query': '{ ping }'})
 
     payloads = [payload for _ in range(requests)]
