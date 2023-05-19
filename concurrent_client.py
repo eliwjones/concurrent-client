@@ -25,8 +25,11 @@ async def async_http_request(session: ClientSession, method: str, headers: dict,
             retry_after = int(response_headers.get('Retry-After', 0))
             wait_until_ts = int(time.time() + retry_after)
 
-            ratelimit_limit = int(response_headers.get('RateLimit-Limit', sys.maxsize))
-            ratelimit_reset = int(response_headers.get('RateLimit-Reset', sys.maxsize))
+            ratelimit_limit = int(response_headers.get('Ratelimit-Limit', sys.maxsize))
+            ratelimit_remaining = int(response_headers.get('Ratelimit-Remaining', sys.maxsize))
+            ratelimit_reset = int(response_headers.get('Ratelimit-Reset', sys.maxsize))
+
+            print(f"[async_http_request] limit: {ratelimit_limit}, remaining: {ratelimit_remaining} reset: {ratelimit_reset}")
 
             """
             TODO: based on what current semaphore count, ratelimit_limit and ratelimit_limit are,
@@ -85,9 +88,10 @@ async def main(requests, concurrency, api):
     results = []
     async for result in batch_requests('POST', headers, api, payloads, concurrency):
         results.append(result)
-        print(result)
 
     print(f"Total Time: {time.time() - start_time}, RETRY_COUNTER: {RETRY_COUNTER} len(results): {len(results)}")
+    for result in results:
+        print(result)
 
 
 if __name__ == '__main__':
