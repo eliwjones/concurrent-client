@@ -14,7 +14,24 @@ RETRY_SLEEP_LOCK = asyncio.Lock()
 RETRY_COUNTER = 0
 
 
-async def async_http_request(session: ClientSession, method: str, headers: dict, url: str, payload: str, semaphore: Semaphore):
+class TotalRequests:
+    def __init__(self, value):
+        self.value = value
+        self._lock = asyncio.Lock()
+
+    async def decrement(self):
+        async with self._lock:
+            self.value -= 1
+            return self.value
+
+    async def get(self):
+        async with self._lock:
+            return self.value
+
+
+async def async_http_request(
+    session: ClientSession, method: str, headers: dict, url: str, payload: str, semaphore: Semaphore, total_requests: TotalRequests
+):
     async with semaphore:
         async with session.request(method, url, headers=headers, data=payload) as response:
             status = response.status
@@ -22,26 +39,54 @@ async def async_http_request(session: ClientSession, method: str, headers: dict,
 
             response_headers = dict(response.headers)
 
-            retry_after = int(response_headers.get('Retry-After', 0))
-            wait_until_ts = int(time.time() + retry_after)
+            limit = int(response_headers.get('Ratelimit-Limit', sys.maxsize))
+            limit_remaining = int(response_headers.get('Ratelimit-Remaining', sys.maxsize))
+            limit_reset = int(response_headers.get('Ratelimit-Reset', sys.maxsize))
 
-            ratelimit_limit = int(response_headers.get('Ratelimit-Limit', sys.maxsize))
-            ratelimit_remaining = int(response_headers.get('Ratelimit-Remaining', sys.maxsize))
-            ratelimit_reset = int(response_headers.get('Ratelimit-Reset', sys.maxsize))
+            wait_until_ts = 0
+            if status == http.client.TOO_MANY_REQUESTS:
+                """
+                TODO: We are stuck estimating a proper Retry-After amount on our own,
+                since chattiness remains once we use up limit_remaining.
 
-            print(f"[async_http_request] limit: {ratelimit_limit}, remaining: {ratelimit_remaining} reset: {ratelimit_reset}")
+                Even if we safely reduce the concurrency semaphore to 1, only allowing
+                one request at a time, the retries sleep whatever few seconds they are asked
+                to and then retry again and again.
 
-            """
-            TODO: based on what current semaphore count, ratelimit_limit and ratelimit_limit are,
-                  should we be slowing down or reducing the semaphore/concurrency amount?
-            """
+                Or, there is a subtle bug!
+                """
+                retry_after = int(response_headers.get('Retry-After', 0))
+                wait_until_ts = int(time.time() + retry_after)
+
+                remaining_requests = await total_requests.get()
+            else:
+                remaining_requests = await total_requests.decrement()
+
+            print(
+                f"[async_http_request] limit: {limit}, remaining: {limit_remaining} reset: {limit_reset}, remaining_requests: {remaining_requests}"
+            )
+
+            if remaining_requests > limit_remaining:
+                while semaphore._value > limit_remaining + 10:
+                    print(f"[async_http_request] reducing concurrency: {semaphore._value}")
+                    await semaphore.acquire()
+                    await asyncio.sleep(0.01)
+            elif remaining_requests < limit_remaining:
+                while semaphore._value < remaining_requests:
+                    print(f"[async_http_request] increasing concurrency: {semaphore._value}")
+                    await semaphore.release()
+                    await asyncio.sleep(0.01)
 
     return status, content, response_headers, wait_until_ts
 
 
-async def request_with_retry(session: ClientSession, method: str, headers: dict, url: str, payload: str, semaphore: Semaphore):
+async def request_with_retry(
+    session: ClientSession, method: str, headers: dict, url: str, payload: str, semaphore: Semaphore, total_requests: TotalRequests
+):
     try:
-        status, content, response_headers, wait_until_ts = await async_http_request(session, method, headers, url, payload, semaphore)
+        status, content, response_headers, wait_until_ts = await async_http_request(
+            session, method, headers, url, payload, semaphore, total_requests
+        )
 
         if status != http.client.TOO_MANY_REQUESTS:
             return url, status, content, ''
@@ -52,12 +97,12 @@ async def request_with_retry(session: ClientSession, method: str, headers: dict,
 
             sleep_seconds = max(wait_until_ts - time.time(), 0)
 
-            print(f"[request_with_retry] TOO_MANY_REQUESTS status: {status}, sleep_seconds: {sleep_seconds}")
-            print(f"[request_with_retry] response_headers: {response_headers}")
+            # print(f"[request_with_retry] TOO_MANY_REQUESTS status: {status}, sleep_seconds: {sleep_seconds}")
+            # print(f"[request_with_retry] response_headers: {response_headers}")
 
             await asyncio.sleep(sleep_seconds)
 
-        return await request_with_retry(session, method, headers, url, payload, semaphore)
+        return await request_with_retry(session, method, headers, url, payload, semaphore, total_requests)
     except Exception as e:
         return url, None, None, e
 
@@ -65,9 +110,13 @@ async def request_with_retry(session: ClientSession, method: str, headers: dict,
 async def batch_requests(method, headers, url, payloads, concurrency):
     requests = [(method.upper(), headers, url, payload) for payload in payloads]
 
+    total_requests = TotalRequests(len(requests))
     semaphore = Semaphore(concurrency)
     async with ClientSession(connector=TCPConnector(limit=concurrency)) as session:
-        tasks = [request_with_retry(session, method, headers, url, payload, semaphore) for method, headers, url, payload in requests]
+        tasks = [
+            request_with_retry(session, method, headers, url, payload, semaphore, total_requests)
+            for method, headers, url, payload in requests
+        ]
 
         counter = 0
         for task in asyncio.as_completed(tasks):
