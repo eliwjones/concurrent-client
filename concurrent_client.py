@@ -14,7 +14,7 @@ RETRY_SLEEP_LOCK = asyncio.Lock()
 RETRY_COUNTER = 0
 
 
-class TotalRequests:
+class RemainingRequests:
     def __init__(self, value):
         self.value = value
         self._lock = asyncio.Lock()
@@ -30,7 +30,7 @@ class TotalRequests:
 
 
 async def async_http_request(
-    session: ClientSession, method: str, headers: dict, url: str, payload: str, semaphore: Semaphore, total_requests: TotalRequests
+    session: ClientSession, method: str, headers: dict, url: str, payload: str, semaphore: Semaphore, remaining_requests: RemainingRequests
 ):
     async with semaphore:
         async with session.request(method, url, headers=headers, data=payload) as response:
@@ -58,21 +58,21 @@ async def async_http_request(
                 retry_after = int(response_headers.get('Retry-After', 0))
                 wait_until_ts = int(time.time() + retry_after)
 
-                remaining_requests = await total_requests.get()
+                remaining = await remaining_requests.get()
             else:
-                remaining_requests = await total_requests.decrement()
+                remaining = await remaining_requests.decrement()
 
             print(
                 f"[async_http_request] limit: {limit}, remaining: {limit_remaining} reset: {limit_reset}, remaining_requests: {remaining_requests}"
             )
 
-            if remaining_requests > limit_remaining:
+            if remaining > limit_remaining:
                 while semaphore._value > limit_remaining + 10:
                     print(f"[async_http_request] reducing concurrency: {semaphore._value}")
                     await semaphore.acquire()
                     await asyncio.sleep(0.01)
-            elif remaining_requests < limit_remaining:
-                while semaphore._value < remaining_requests:
+            elif remaining < limit_remaining:
+                while semaphore._value < remaining:
                     print(f"[async_http_request] increasing concurrency: {semaphore._value}")
                     await semaphore.release()
                     await asyncio.sleep(0.01)
@@ -81,11 +81,11 @@ async def async_http_request(
 
 
 async def request_with_retry(
-    session: ClientSession, method: str, headers: dict, url: str, payload: str, semaphore: Semaphore, total_requests: TotalRequests
+    session: ClientSession, method: str, headers: dict, url: str, payload: str, semaphore: Semaphore, remaining_requests: RemainingRequests
 ):
     try:
         status, content, response_headers, wait_until_ts = await async_http_request(
-            session, method, headers, url, payload, semaphore, total_requests
+            session, method, headers, url, payload, semaphore, remaining_requests
         )
 
         if status != http.client.TOO_MANY_REQUESTS:
@@ -97,12 +97,12 @@ async def request_with_retry(
 
             sleep_seconds = max(wait_until_ts - time.time(), 0)
 
-            # print(f"[request_with_retry] TOO_MANY_REQUESTS status: {status}, sleep_seconds: {sleep_seconds}")
-            # print(f"[request_with_retry] response_headers: {response_headers}")
+            print(f"[request_with_retry] TOO_MANY_REQUESTS status: {status}, sleep_seconds: {sleep_seconds}")
+            print(f"[request_with_retry] response_headers: {response_headers}")
 
             await asyncio.sleep(sleep_seconds)
 
-        return await request_with_retry(session, method, headers, url, payload, semaphore, total_requests)
+        return await request_with_retry(session, method, headers, url, payload, semaphore, remaining_requests)
     except Exception as e:
         return url, None, None, e
 
@@ -110,11 +110,11 @@ async def request_with_retry(
 async def batch_requests(method, headers, url, payloads, concurrency):
     requests = [(method.upper(), headers, url, payload) for payload in payloads]
 
-    total_requests = TotalRequests(len(requests))
+    remaining_requests = RemainingRequests(len(requests))
     semaphore = Semaphore(concurrency)
     async with ClientSession(connector=TCPConnector(limit=concurrency)) as session:
         tasks = [
-            request_with_retry(session, method, headers, url, payload, semaphore, total_requests)
+            request_with_retry(session, method, headers, url, payload, semaphore, remaining_requests)
             for method, headers, url, payload in requests
         ]
 
