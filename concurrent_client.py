@@ -1,5 +1,4 @@
 import asyncio
-import http.client
 import json
 import os
 import sys
@@ -12,6 +11,7 @@ from aiohttp import ClientSession, TCPConnector
 
 RETRY_SLEEP_LOCK = asyncio.Lock()
 RETRY_COUNTER = 0
+TOO_MANY_REQUESTS = 429
 
 
 class RemainingRequests:
@@ -44,7 +44,7 @@ async def async_http_request(
             limit_reset = int(response_headers.get('Ratelimit-Reset', sys.maxsize))
 
             wait_until_ts = 0
-            if status == http.client.TOO_MANY_REQUESTS:
+            if status == TOO_MANY_REQUESTS:
                 """
                 TODO: We are stuck estimating a proper Retry-After amount on our own,
                 since chattiness remains once we use up limit_remaining.
@@ -88,7 +88,7 @@ async def request_with_retry(
             session, method, headers, url, payload, semaphore, remaining_requests
         )
 
-        if status != http.client.TOO_MANY_REQUESTS:
+        if status != TOO_MANY_REQUESTS:
             return url, status, content, ''
 
         async with RETRY_SLEEP_LOCK:
@@ -134,9 +134,7 @@ async def main(requests, concurrency, api):
     payloads = [payload for _ in range(requests)]
 
     start_time = time.time()
-    results = []
-    async for result in batch_requests('POST', headers, api, payloads, concurrency):
-        results.append(result)
+    results = [result async for result in batch_requests('POST', headers, api, payloads, concurrency)]
 
     print(f"Total Time: {time.time() - start_time}, RETRY_COUNTER: {RETRY_COUNTER} len(results): {len(results)}")
     for result in results:
