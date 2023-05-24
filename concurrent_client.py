@@ -5,6 +5,10 @@ import sys
 import time
 
 from asyncio import Semaphore
+from typing import Union
+
+import pandas
+import pyarrow
 
 from aiohttp import ClientSession, TCPConnector
 
@@ -63,7 +67,7 @@ async def async_http_request(
                 remaining = await remaining_requests.decrement()
 
             print(
-                f"[async_http_request] limit: {limit}, remaining: {limit_remaining} reset: {limit_reset}, remaining_requests: {remaining_requests}"
+                f"[async_http_request] limit: {limit}, remaining: {limit_remaining} reset: {limit_reset}, remaining_requests: {remaining}"
             )
 
             if remaining > limit_remaining:
@@ -125,6 +129,33 @@ async def batch_requests(method, headers, url, payloads, concurrency):
 
             if not counter % 369:
                 print(f"[counter] {counter}")
+
+
+async def with_embeddings(async_func, data: Union[pyarrow.Table, pandas.DataFrame], batch_size=100, concurrency=1000):
+    if isinstance(data, pandas.DataFrame):
+        data = pyarrow.Table.from_pandas(data, preserve_index=False)
+
+    numpy_array = data['text'].to_numpy()
+
+    return yield_embeddings(async_func, numpy_array, batch_size, concurrency)
+
+
+async def yield_embeddings(async_func, numpy_array, batch_size, concurrency):
+    remaining_requests = RemainingRequests((len(numpy_array) // batch_size) + 1)
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async with ClientSession(connector=TCPConnector(limit=concurrency)) as session:
+        tasks = []
+        for batch in yield_batches(numpy_array, batch_size):
+            tasks.append(async_func(session, semaphore, remaining_requests, batch))
+
+        for task in asyncio.as_completed(tasks):
+            yield await task
+
+
+def yield_batches(numpy_array, batch_size):
+    for i in range(0, len(numpy_array), batch_size):
+        yield numpy_array[i : i + batch_size]
 
 
 async def main(requests, concurrency, api):
