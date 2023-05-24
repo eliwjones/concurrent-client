@@ -78,7 +78,7 @@ async def async_http_request(
             elif remaining < limit_remaining:
                 while semaphore._value < remaining:
                     print(f"[async_http_request] increasing concurrency: {semaphore._value}")
-                    await semaphore.release()
+                    semaphore.release()
                     await asyncio.sleep(0.01)
 
     return status, content, response_headers, wait_until_ts
